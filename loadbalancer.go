@@ -1,34 +1,79 @@
-package loadbalancer
+package main //loadbalancer
 
 import (
 	"container/heap"
 	"fmt"
-	"math/rand"
 	"time"
 )
 
 const nWorker = 10
 
-func workFn() int {
-	return rand.Int()
+type Pool []*Worker
+
+func (p Pool) Less(i, j int) bool {
+	return p[i].pending < p[j].pending
+}
+func (p Pool) Len() int { return len(p) }
+
+func (p Pool) Swap(i, j int) {
+	p[i], p[j] = p[j], p[i]
+	p[i].index = i
+	p[j].index = j
+}
+
+func (p *Pool) Push(i interface{}) {
+	n := len(*p)
+	item := i.(*Worker)
+	item.index = n
+	*p = append(*p, item)
+}
+
+func (p *Pool) Pop() interface{} {
+	old := *p
+	n := len(old)
+	item := old[n-1]
+	item.index = -1
+	*p = old[0 : n-1]
+	return item
+}
+
+func workFn(n int) int {
+	return n * n
 }
 func furtherProcess(n int) {
-	fmt.Println("answer is ", n)
+	// fmt.Println("answer is ", n)
 }
 
 type Request struct {
-	fn func() int //The operation to perform.
-	c  chan int   //The channel to return the result
+	fn func(int) int //The operation to perform.
+	n  int
+	c  chan int //The channel to return the result
 }
 
 func requester(work chan<- Request) {
 	c := make(chan int)
 	for {
 		//Kill some time (fake load).
-		time.Sleep(time.Duration(rand.Int63n(nWorker)) * time.Second)
-		work <- Request{workFn, c} //send request
-		result := <-c              //wait for answer
+		time.Sleep(500 * time.Millisecond)
+		work <- Request{workFn, 1, c} //send request
+		result := <-c                 //wait for answer
 		furtherProcess(result)
+	}
+}
+
+//test
+func requesterOne(work chan<- Request) {
+	c := make(chan int)
+	for i := 0; i <= 1000000; i++ {
+
+		work <- Request{fn: workFn, n: i, c: c}
+		result := <-c
+		furtherProcess(result)
+		if i == 1000000 {
+			fmt.Println("job done")
+			fmt.Println("end:", time.Now().Local())
+		}
+
 	}
 }
 
@@ -40,17 +85,11 @@ type Worker struct {
 
 func (w *Worker) work(done chan *Worker) {
 	for {
-		req := <-w.requests // get Request from balancer
-		req.c <- req.fn()   // call fn and send result
-		done <- w           // we've finished this request
+		req := <-w.requests    // get Request from balancer
+		req.c <- req.fn(req.n) // call fn and send result
+		done <- w              // we've finished this request
 
 	}
-}
-
-type Pool []*Worker
-
-func (p Pool) Less(i, j int) bool {
-	return p[i].pending < p[j].pending
 }
 
 type Balancer struct {
@@ -63,7 +102,7 @@ func (b *Balancer) balance(work chan Request) {
 		select {
 		case req := <-work: //received a Request
 			b.dispatch(req) //so send it to a Worker
-		case w := b.done: //a worker has finished
+		case w := <-b.done: //a worker has finished
 			b.completed(w) //so update its info
 		}
 	}
@@ -89,4 +128,26 @@ func (b *Balancer) completed(w *Worker) {
 	heap.Remove(&b.pool, w.index)
 	// Put it into its place on the heap.
 	heap.Push(&b.pool, w)
+}
+
+func main() {
+	fmt.Println("begin:", time.Now().Local())
+	workChan := make(chan Request)
+	doneChan := make(chan *Worker, nWorker)
+	pool := Pool{}
+	//init worker
+	for i := 0; i < nWorker; i++ {
+		worker := Worker{requests: make(chan Request, 10)}
+		go worker.work(doneChan)
+		pool = append(pool, &worker)
+	}
+
+	go requesterOne(workChan)
+
+	balancer := Balancer{
+		pool: pool,
+		done: doneChan,
+	}
+
+	balancer.balance(workChan)
 }
